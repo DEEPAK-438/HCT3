@@ -1,0 +1,146 @@
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+
+app = Flask(__name__)  # Initialize the Flask app
+app.config['SECRET_KEY'] = 'your_secret_key'  # Secret key for session management
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///auction.db'  # Database URI
+db = SQLAlchemy(app)  # Initialize the SQLAlchemy database
+
+# User model to store user details
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)  # Primary key
+    username = db.Column(db.String(150), unique=True, nullable=False)  # Unique username
+    email = db.Column(db.String(150), unique=True, nullable=False)  # Unique email
+    password = db.Column(db.String(150), nullable=False)  # Hashed password
+
+# Auction model to store auction details
+class Auction(db.Model):
+    id = db.Column(db.Integer, primary_key=True)  # Primary key
+    title = db.Column(db.String(150), nullable=False)  # Title of the auction
+    description = db.Column(db.Text, nullable=False)  # Description of the auction
+    starting_bid = db.Column(db.Float, nullable=False)  # Starting bid amount
+    current_bid = db.Column(db.Float, nullable=False)  # Current highest bid
+    auctioneer_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to the user who created the auction
+    end_time = db.Column(db.DateTime, nullable=False)  # End time of the auction
+    bids = db.relationship('Bid', backref='auction', lazy=True)  # Relationship with bids
+
+# Bid model to store bids
+class Bid(db.Model):
+    id = db.Column(db.Integer, primary_key=True)  # Primary key
+    amount = db.Column(db.Float, nullable=False)  # Amount of the bid
+    bidder_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)  # Foreign key linking to the user who placed the bid
+    auction_id = db.Column(db.Integer, db.ForeignKey('auction.id'), nullable=False)  # Foreign key linking to the auction
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)  # Timestamp of the bid
+
+# User registration route
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        # Retrieve form data
+        username = request.form['username']
+        email = request.form['email']
+        password = generate_password_hash(request.form['password'], method='sha256')  # Hash the password
+
+        # Create a new user and add to the database
+        new_user = User(username=username, email=email, password=password)
+        db.session.add(new_user)
+        db.session.commit()
+        
+        flash('Registration successful! Please log in.', 'success')  # Flash message
+        return redirect(url_for('login'))
+    return render_template('register.html')  # Render registration template
+
+# User login route
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        # Retrieve form data
+        email = request.form['email']
+        password = request.form['password']
+
+        user = User.query.filter_by(email=email).first()  # Query the user by email
+        if user and check_password_hash(user.password, password):  # Verify password
+            session['user_id'] = user.id  # Store user ID in session
+            flash('Login successful!', 'success')  # Flash message
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Invalid email or password', 'danger')  # Flash message for errors
+    return render_template('login.html')  # Render login template
+
+# User dashboard route
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))  # Redirect to login if not logged in
+
+    auctions = Auction.query.filter(Auction.end_time > datetime.utcnow()).all()  # Retrieve ongoing auctions
+    return render_template('dashboard.html', auctions=auctions)  # Render dashboard template
+
+# Create an auction route
+@app.route('/create-auction', methods=['GET', 'POST'])
+def create_auction():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))  # Redirect to login if not logged in
+
+    if request.method == 'POST':
+        # Retrieve form data
+        title = request.form['title']
+        description = request.form['description']
+        starting_bid = float(request.form['starting_bid'])
+        end_time = datetime.strptime(request.form['end_time'], '%Y-%m-%d %H:%M:%S')  # Parse end time
+
+        # Create a new auction and add to the database
+        new_auction = Auction(
+            title=title,
+            description=description,
+            starting_bid=starting_bid,
+            current_bid=starting_bid,
+            auctioneer_id=session['user_id'],
+            end_time=end_time
+        )
+        db.session.add(new_auction)
+        db.session.commit()
+
+        flash('Auction created successfully!', 'success')  # Flash message
+        return redirect(url_for('dashboard'))
+    return render_template('create_auction.html')  # Render auction creation template
+
+# Place a bid route
+@app.route('/bid/<int:auction_id>', methods=['POST'])
+def bid(auction_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))  # Redirect to login if not logged in
+
+    auction = Auction.query.get_or_404(auction_id)  # Retrieve auction by ID
+    bid_amount = float(request.form['bid_amount'])  # Retrieve bid amount
+
+    if bid_amount > auction.current_bid:  # Check if the bid is higher than the current bid
+        # Create a new bid and update the auction's current bid
+        new_bid = Bid(
+            amount=bid_amount,
+            bidder_id=session['user_id'],
+            auction_id=auction_id
+        )
+        auction.current_bid = bid_amount
+        db.session.add(new_bid)
+        db.session.commit()
+
+        flash('Bid placed successfully!', 'success')  # Flash message
+    else:
+        flash('Bid amount must be higher than the current bid.', 'danger')  # Flash message for errors
+
+    return redirect(url_for('dashboard'))
+
+# Logout route
+@app.route('/logout')
+def logout():
+    session.pop('user_id', None)  # Remove user ID from session
+    flash('You have been logged out.', 'info')  # Flash message
+    return redirect(url_for('login'))
+
+# Run the app
+if __name__ == '__main__':
+    db.create_all()  # Create database tables
+    app.run(debug=True)  # Run the Flask app in debug mode
